@@ -2,7 +2,7 @@
 // Microsoft Visual C++ generated include file.
 // Used by SigDrop.rc
 //
-#define IDR_DLL1                        101
+#define IDR_PAYLOAD  0x1A7
 
 // Next default values for new objects
 // 
