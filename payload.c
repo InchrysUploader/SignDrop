@@ -6,6 +6,13 @@
 #include <string.h>
 #include <wchar.h>
 
+#ifndef DESKTOP_ALL_ACCESS
+#define DESKTOP_ALL_ACCESS (STANDARD_RIGHTS_REQUIRED | DESKTOP_READOBJECTS | \
+	DESKTOP_CREATEWINDOW | DESKTOP_CREATEMENU | DESKTOP_HOOKCONTROL | \
+	DESKTOP_JOURNALRECORD | DESKTOP_JOURNALPLAYBACK | DESKTOP_ENUMERATE | \
+	DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP)
+#endif
+
 static DWORD WINAPI KillConsent(LPVOID unused)
 {
 	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -15,7 +22,7 @@ static DWORD WINAPI KillConsent(LPVOID unused)
 	if (Process32First(snap, &pe))
 	{
 		do {
-			if (!_wcsicmp(pe.szExeFile, L"consent.exe"))
+			if (!lstrcmpiA(pe.szExeFile, "consent.exe"))
 			{
 				HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
 				if (h) { TerminateProcess(h, 0); CloseHandle(h); }
