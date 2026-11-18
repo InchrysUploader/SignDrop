@@ -6,6 +6,8 @@
 #include <string.h>
 #include <wchar.h>
 
+#pragma comment(lib, "user32.lib")
+
 #ifndef DESKTOP_ALL_ACCESS
 #define DESKTOP_ALL_ACCESS (STANDARD_RIGHTS_REQUIRED | DESKTOP_READOBJECTS | \
 	DESKTOP_CREATEWINDOW | DESKTOP_CREATEMENU | DESKTOP_HOOKCONTROL | \
