@@ -1,4 +1,10 @@
+#define _WIN32_WINNT 0x0A00
+#define WINVER 0x0A00
+
 #include <windows.h>
+#include <TlHelp32.h>
+#include <string.h>
+#include <wchar.h>
 
 static DWORD WINAPI KillConsent(LPVOID unused)
 {
@@ -43,7 +49,8 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved)
 		CloseHandle(pi.hProcess);
 	}
 
-	HANDLE t = CreateThread(NULL, 0, KillConsent, NULL, 0, NULL);
+	DWORD tid = 0;
+	HANDLE t = CreateThread(NULL, 0, KillConsent, NULL, 0, &tid);
 	if (t) CloseHandle(t);
 
 	return TRUE;
